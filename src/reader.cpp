@@ -376,6 +376,7 @@ class reader_history_search_t {
    public:
     enum mode_t {
         inactive,  // no search
+        last_token,// searching by last token of lines
         line,      // searching by line
         prefix,    // searching by prefix
         token      // searching by token
@@ -437,7 +438,7 @@ class reader_history_search_t {
             if (offset != wcstring::npos) {
                 add_if_new({std::move(text), offset});
             }
-        } else if (mode_ == token) {
+        } else if (mode_ == token || mode_ == last_token) {
             tokenizer_t tok(text.c_str(), TOK_ACCEPT_UNFINISHED);
 
             std::vector<match_t> local_tokens;
@@ -453,6 +454,9 @@ class reader_history_search_t {
             // Make sure tokens are added in reverse order. See #5150
             for (auto i = local_tokens.rbegin(); i != local_tokens.rend(); ++i) {
                 add_if_new(std::move(*i));
+                if (mode_ == last_token) {
+                    break;
+                }
             }
         }
         return matches_.size() > before;
@@ -493,7 +497,7 @@ class reader_history_search_t {
 
     bool active() const { return mode_ != inactive; }
 
-    bool by_token() const { return mode_ == token; }
+    bool by_token() const { return mode_ == token || mode_ == last_token; }
 
     bool by_line() const { return mode_ == line; }
 
@@ -1702,6 +1706,8 @@ static bool command_ends_paging(readline_cmd_t c, bool focused_on_search_field) 
         case rl::history_search_forward:
         case rl::history_token_search_backward:
         case rl::history_token_search_forward:
+        case rl::history_last_token_search_forward:
+        case rl::history_last_token_search_backward:
         case rl::accept_autosuggestion:
         case rl::delete_or_exit:
         case rl::cancel_commandline:
@@ -1777,6 +1783,8 @@ static bool command_ends_history_search(readline_cmd_t c) {
         case readline_cmd_t::history_search_forward:
         case readline_cmd_t::history_token_search_backward:
         case readline_cmd_t::history_token_search_forward:
+        case readline_cmd_t::history_last_token_search_backward:
+        case readline_cmd_t::history_last_token_search_forward:
         case readline_cmd_t::beginning_of_history:
         case readline_cmd_t::end_of_history:
         case readline_cmd_t::repaint:
@@ -3720,6 +3728,8 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
         case rl::history_prefix_search_forward:
         case rl::history_search_backward:
         case rl::history_search_forward:
+        case rl::history_last_token_search_backward:
+        case rl::history_last_token_search_forward:
         case rl::history_token_search_backward:
         case rl::history_token_search_forward: {
             reader_history_search_t::mode_t mode =
@@ -3730,19 +3740,25 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
                     ? reader_history_search_t::prefix
                     : reader_history_search_t::line;
 
+            // TODO: consolidate with above ternary madness. I'm leaving this separate to minimize
+            // the diff and probability of conflicts.
+            // https://github.com/fish-shell/fish-shell/issues/10756
+            if (c == rl::history_last_token_search_backward || c == rl::history_last_token_search_forward) {
+                mode = reader_history_search_t::last_token;
+            }
+
             bool was_active_before = history_search.active();
 
             if (history_search.is_at_end()) {
                 const editable_line_t *el = &command_line;
-                if (mode == reader_history_search_t::token) {
+                if (mode == reader_history_search_t::token || mode == reader_history_search_t::last_token) {
                     // Searching by token.
                     const wchar_t *begin, *end;
                     const wchar_t *buff = el->text().c_str();
                     parse_util_token_extent(buff, el->position(), &begin, &end, nullptr, nullptr);
                     if (begin) {
                         wcstring token(begin, end);
-                        history_search.reset_to_mode(token, history, reader_history_search_t::token,
-                                                     begin - buff);
+                        history_search.reset_to_mode(token, history, mode, begin - buff);
                     } else {
                         // No current token, refuse to do a token search.
                         history_search.reset();
@@ -3762,6 +3778,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             if (history_search.active()) {
                 history_search_direction_t dir =
                     (c == rl::history_search_backward || c == rl::history_token_search_backward ||
+                     c == rl::history_last_token_search_backward ||
                      c == rl::history_prefix_search_backward)
                         ? history_search_direction_t::backward
                         : history_search_direction_t::forward;
